@@ -1,0 +1,170 @@
+#!/bin/bash
+
+
+## Copyright (C) 2009 LiShaolin <lslxdx@163.com>
+##
+## This script is licensed under the terms of the MIT license.
+## https://opensource.org/licenses/MIT
+
+USER=root
+PASSWD=''
+HOST=localhost
+PORT=3306
+
+#USER=mysql_user_name
+#PASSWD='mysql_passwd'
+#HOST='mysql.server.ip.or.domain'
+#PORT=3306
+
+export TOP_PID=$$
+trap 'exit 1' USR1
+
+show_usage(){
+  echo 'Invalid argument list. Usage:'
+  echo 'slowlog_dump <data_path>'
+}
+
+source lockable.sh
+
+md5sum=md5sum
+if [ $(uname) = 'Darwin' ]
+then
+  md5sum='md5 -r'
+fi
+
+is_number(){
+  if [ -n "$1" ] && [ -z "$(echo $1|sed 's/[0-9]//g')" ]
+  then
+    return 0
+  else
+    return 1
+  fi
+}
+
+COUNT_SLOWLOG_SQL="select @cnt:=count(1) cnt from mysql.slow_log; set @offset=if(@cnt < 1, 0, @cnt - 1); prepare stmt from 'select * from mysql.slow_log limit ?,1'; execute stmt using @offset\G;"
+DUMP_SLOWLOG_SQL="select * from mysql.slow_log "
+
+exec_sql(){
+  local sql="$1"
+  if [[ -n "$PASSWD" ]]
+  then
+    mysql -u$USER -p$PASSWD -h$HOST -P$PORT -e "$sql"
+  else
+    mysql -u$USER           -h$HOST -P$PORT -e "$sql"
+  fi
+
+  if [[ $? -ne 0 ]]
+  then
+    echo "[exec_sql] fail to execute sql[$DUMP_SLOWLOG_SQL limit $offset,1], exit!" 1<&2
+    kill -s USR1 $TOP_PID
+  fi
+}
+
+count_slowlog(){
+  exec_sql "$COUNT_SLOWLOG_SQL" | awk 'NR>=2{print $0}' > "$TMP_PATH/count_slowlog.tmp"
+}
+
+hash_slowlog(){
+  awk 'NR>=2{print $0}' "$1"|$md5sum
+}
+
+is_log_rotated(){
+  local offset
+  local hash_1
+  local hash_2
+
+  hash_1="$(awk 'NR>=2{print $0}' "$1"|$md5sum)"
+  if [[ $? -eq 0 ]]
+  then
+    offset="$(bc <<<"$2 - 1")"
+    if [[ "$offset" -lt "0" ]]; then offset=0; fi;
+
+    hash_2="$(exec_sql "$DUMP_SLOWLOG_SQL limit $offset,1\G" |$md5sum)"
+    if [[ -z "$hash_1" || -z "$hash_2" || "$hash_1" = "$hash_2" ]]; then echo "0"; else echo "1"; fi;
+  else
+    echo "1"
+  fi
+}
+
+compare_slowlog_count(){
+  :>"$DATA_PATH/mysql.task"
+
+  local cnt_all_code
+  read cnt_all < <(awk 'NR==1{print $0}' "$DATA_PATH/count_slowlog.all"|grep -o '[0-9]\+')
+  cnt_all_code=$?
+  read cnt_tmp < <(awk 'NR==1{print $0}' "$TMP_PATH/count_slowlog.tmp" |grep -o '[0-9]\+')
+
+  if [[ $? -eq 0 && $cnt_all_code -eq 0 && "$(is_log_rotated "$DATA_PATH/count_slowlog.all" "$cnt_all")" = "0" && $cnt_all -le $cnt_tmp ]]
+  then
+    if [[ $cnt_all -eq $cnt_tmp ]]
+    then
+      # local.count = remote.count; no dump
+      echo "$cnt_all 0" >> "$DATA_PATH/mysql.task"
+    else
+      # local.count < remote.count; dump delta
+      echo "$cnt_all $(bc <<<"$cnt_tmp - $cnt_all")" >> "$DATA_PATH/mysql.task"
+    fi
+  else
+    # local not exists or local.size > remote.size; dump all
+    echo "0 $cnt_tmp" >> "$DATA_PATH/mysql.task"
+  fi
+}
+
+upsert_slow_count(){
+  cat "$TMP_PATH/count_slowlog.tmp" > "$DATA_PATH/count_slowlog.all"
+}
+
+exec_mysql_task(){
+  local offset
+  local limit
+  local tmp_slowlog_file="$TMP_PATH/slowlog.tmp"
+
+  read offset limit < "$DATA_PATH/mysql.task"
+  if [[ $? -eq 0 && $(is_number $offset) -eq 0 && $(is_number $limit) -eq 0 ]]
+  then
+    if [[ "$limit" -gt 0 ]]
+    then
+      exec_sql "$DUMP_SLOWLOG_SQL limit $offset,$limit\G" > "$tmp_slowlog_file"
+      cat "$tmp_slowlog_file" >> "$SLOWLOG_FILE"
+      echo "# EOF by 'slowlog_dump' script" >> "$SLOWLOG_FILE"
+      upsert_slow_count
+    fi
+  else
+    echo "[exec_mysql_task] fail to read offset[$offset], limit[$limit] or one of them is NOT a number at least" 1<&2
+  fi
+}
+
+rm_tmp_files(){
+  find "$TMP_PATH" -name '*.tmp' -type f -delete
+}
+
+main(){
+  if [[ $# -lt 1 ]]; then show_usage; exit 1;fi
+
+  if [[ ! -w "$1" || ! -d "$1" ]]; then echo "Cannot write to directory [$1]."; exit 1; fi
+  DATA_PATH="$(cd "$1"; pwd)" 
+  TMP_PATH="$DATA_PATH/tmp.d"
+  SLOWLOG_FILE="$DATA_PATH/slowlog.log"
+
+  exec 2> >(while read line; do echo "[$(date "+%Y-%m-%d %H:%M:%S")] $line"|tee -a "$DATA_PATH/error.log"; done)
+
+  if type flock &>/dev/null
+  then
+    _prepare_locking
+    if ! exlock_now; then echo "Fail to lock [$LOCKFILE]" 1<&2; exit 1; fi;
+  else
+    echo "Running in non-single-instance mode due to [$(type flock 2<&1)]" 1<&2
+  fi
+
+  mkdir -p "$TMP_PATH"
+
+  echo 'Running...'
+  count_slowlog
+  compare_slowlog_count
+  exec_mysql_task
+  rm_tmp_files
+  echo 'Done.'
+}
+
+main "$@"
+
