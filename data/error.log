@@ -1,3 +1,0 @@
-[2017-03-20 18:09:09] Running in non-single-instance mode due to [./slowlog_dump: line 156: type: flock: not found]
-[2017-03-20 18:09:09] awk: can't open file /Users/lishaolin/Workspace/Github/slowlog_dump/data/count_slowlog.all
-[2017-03-20 18:09:09] source line number 1
