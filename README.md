@@ -9,9 +9,11 @@ A simple &amp; reliable Shell script for dumping MySQL slowlog, especially frien
 
 # Requirements
 * `mysql` command
-* `GRANT REPLICATION CLIENT ON *.* TO mysql_user_name@mysql.client.ip.or.domain;`
+* `SET @@global.slow_query_log=1` # enable slow log
+* `SET @@global.log_output=TABLE` # write slow log to `mysql.slow_log`
+* `SET @@global.long_query_time=3`# set slow query time(unit: second)
 * `flock` command(best to have)
-* `w(rite)` permission to `/var/lock/`
+* `w(rite)` permission to `/var/lock/`(best to have)
 
 # Feature
 * Simple: easy to deploy, only 1-2 script files, no need to run `yum install xxx`;
